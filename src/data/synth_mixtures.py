@@ -101,12 +101,29 @@ class ChemicalPool:
 
 
 def _random_baseline(grid: np.ndarray, rng: np.random.Generator, amp: float = 0.05) -> np.ndarray:
-    order = rng.integers(3, 6)  # polynomial order 3..5
-    coeffs = rng.uniform(-1.0, 1.0, size=order + 1)
+    """Generate a physically realistic fluorescence baseline (always non-negative).
+
+    Real fluorescence backgrounds are smooth, broad, and always ADD intensity
+    to the Raman signal.  We use an exponential-quadratic shape so the
+    baseline is guaranteed positive everywhere.
+    """
     x = np.linspace(-1, 1, grid.size, dtype=np.float32)
-    poly = np.polyval(coeffs, x).astype(np.float32)
-    peak = np.max(np.abs(poly)) + 1e-9
-    return (poly / peak * amp * rng.uniform(0.5, 1.5)).astype(np.float32)
+    # Smooth positive bump: exp(-(x-center)^2 / width^2) scaled randomly
+    center = float(rng.uniform(-0.5, 0.5))
+    width = float(rng.uniform(0.5, 2.0))
+    bump = np.exp(-((x - center) ** 2) / (width ** 2 + 1e-9)).astype(np.float32)
+    # Optional second bump for more complex shapes
+    if rng.random() > 0.5:
+        c2 = float(rng.uniform(-0.8, 0.8))
+        w2 = float(rng.uniform(0.3, 1.5))
+        bump2 = np.exp(-((x - c2) ** 2) / (w2 ** 2 + 1e-9)).astype(np.float32)
+        bump = bump + float(rng.uniform(0.2, 0.8)) * bump2
+    # Add a gentle linear slope
+    slope = float(rng.uniform(-0.3, 0.3))
+    bump = bump + np.clip(slope * x + 0.5, 0, None).astype(np.float32) * 0.3
+    # Normalize and scale
+    bump = bump / (np.max(bump) + 1e-9)
+    return (bump * amp * float(rng.uniform(0.5, 1.5))).astype(np.float32)
 
 
 def _add_noise(y: np.ndarray, rng: np.random.Generator, snr_db: float) -> np.ndarray:
@@ -240,7 +257,11 @@ class SyntheticMixtures(IterableDataset):
         M_mask = np.stack(masks, 0)
         union_mask = M_mask[:K].any(0)
 
-        y = (coeffs_in[:, None] * R_clean[:K]).sum(0)
+        # Global intensity scale applied BEFORE mixing so labels stay consistent
+        intensity_scale = float(rng.uniform(0.7, 1.3))
+        R_scaled = R_clean * intensity_scale
+
+        y = (coeffs_in[:, None] * R_scaled[:K]).sum(0)
 
         baseline = _random_baseline(grid, rng, amp=cfg.baseline_amp)
         y = y + baseline
@@ -249,7 +270,6 @@ class SyntheticMixtures(IterableDataset):
         y = _peak_shift(y, rng, cfg.max_peak_shift)
         if rng.random() < cfg.jitter_prob:
             y = _jitter_broadening(y, rng)
-        y = y * float(rng.uniform(0.7, 1.3))
         y[~union_mask] = 0.0
 
         # Shuffle in-mixture vs distractors so the model can't cheat on ordering
@@ -257,7 +277,7 @@ class SyntheticMixtures(IterableDataset):
         c_full = np.concatenate([coeffs_in, np.zeros(M, dtype=np.float32)])
         perm = np.arange(total)
         rng.shuffle(perm)
-        R_out = R_clean[perm]
+        R_out = R_scaled[perm]  # use scaled references so c * R matches y
         c_out = c_full[perm]
         ref_names = [(*in_names, *dist_names)[i] for i in perm]
 

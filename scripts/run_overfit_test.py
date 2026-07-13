@@ -66,8 +66,8 @@ print(f"Batch shapes: y={y.shape}, R={R.shape}, c={c_true.shape}, mask={mask.sha
 
 # ── Model ─────────────────────────────────────────────────────────────
 model = DecomposeModel(
-    d_model=256,        # full size for overfit test
-    n_transformer_layers=2,
+    d_model=128,
+    n_transformer_layers=1,
     n_heads=4,
     dropout=0.0,        # no dropout for overfit
     poly_order=5,
@@ -76,13 +76,13 @@ model = DecomposeModel(
 n_params = sum(p.numel() for p in model.parameters())
 print(f"Model parameters: {n_params:,}")
 
-criterion = DecomposeLoss(lambda_c=1.0, lambda_r=1.0, lambda_b=0.5, lambda_l1=0.0)
+criterion = DecomposeLoss(lambda_c=1.0, lambda_r=1.0, lambda_sad=1.0, lambda_b=0.5, lambda_l1=0.0)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=N_STEPS, eta_min=1e-5)
 
 # ── Train ─────────────────────────────────────────────────────────────
 print(f"\nTraining for {N_STEPS} steps...")
-history = {"loss": [], "loss_c": [], "loss_r": [], "loss_b": []}
+history = {"loss": [], "loss_c": [], "loss_r": [], "loss_sad": [], "loss_b": []}
 
 for step in range(1, N_STEPS + 1):
     model.train()
@@ -112,7 +112,8 @@ print("\nPlotting...")
 fig, ax = plt.subplots(figsize=(8, 5))
 ax.plot(history["loss"], label="total", lw=1.5)
 ax.plot(history["loss_c"], label="coeff MAE", lw=1, alpha=0.7)
-ax.plot(history["loss_r"], label="reconstruction", lw=1, alpha=0.7)
+ax.plot(history["loss_r"], label="reconstruction MSE", lw=1, alpha=0.7)
+ax.plot(history["loss_sad"], label="SAD", lw=1, alpha=0.7)
 ax.plot(history["loss_b"], label="baseline", lw=1, alpha=0.7)
 ax.set_xlabel("Step")
 ax.set_ylabel("Loss")

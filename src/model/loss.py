@@ -1,11 +1,19 @@
 """
-Combined loss for spectral decomposition.
+Combined loss for spectral decomposition (v2).
+
+v2 changes (based on literature review):
+  1. Reconstruction uses b_pred (NOT b_true). At inference b_true is unavailable,
+     so the model must learn to use its own baseline prediction.
+  2. Added SAD (Spectral Angle Distance) — scale-invariant spectral shape loss.
+     Used by EGU-Net, PNAS 2024 autoencoder papers.
+  3. Removed lambda_neg — coefficients now use softmax (architecturally non-negative).
+  4. Kept L1 sparsity on coefficients (important for distractor suppression).
 
 L = lambda_c   * MAE(c_pred, c_true)
-  + lambda_r   * reconstruction_loss(y - b_true, R, c_pred, mask)
-  + lambda_b   * MAE(b_pred, b_true)  on masked points
-  + lambda_l1  * L1(c_pred)           sparsity on predicted coefficients
-  + lambda_neg * mean(relu(-c_pred))  penalize negative coefficients
+  + lambda_r   * MSE(y - b_pred, c_pred @ R)     reconstruction with MODEL's baseline
+  + lambda_sad * SAD(y - b_pred, c_pred @ R)      spectral angle distance
+  + lambda_b   * MAE(b_pred, b_true)              baseline supervision
+  + lambda_l1  * L1(c_pred)                       sparsity
 """
 
 from __future__ import annotations
@@ -14,21 +22,44 @@ import torch
 import torch.nn as nn
 
 
+def spectral_angle_distance(y: torch.Tensor, y_hat: torch.Tensor,
+                            mask: torch.Tensor) -> torch.Tensor:
+    """
+    Compute mean SAD between target and prediction over the batch.
+
+    SAD = arccos(cos_sim(y, y_hat)) / pi,  normalized to [0, 1].
+    Masked points are excluded.
+    """
+    # Apply mask
+    y_m = y * mask.float()
+    y_hat_m = y_hat * mask.float()
+
+    # Cosine similarity per sample
+    dot = (y_m * y_hat_m).sum(dim=-1)  # (B,)
+    norm_y = torch.norm(y_m, dim=-1).clamp(min=1e-8)
+    norm_yh = torch.norm(y_hat_m, dim=-1).clamp(min=1e-8)
+    cos_sim = dot / (norm_y * norm_yh)
+    cos_sim = cos_sim.clamp(-1 + 1e-7, 1 - 1e-7)  # numerical stability
+
+    sad = torch.acos(cos_sim) / torch.pi  # [0, 1]
+    return sad.mean()
+
+
 class DecomposeLoss(nn.Module):
     def __init__(
         self,
         lambda_c: float = 1.0,
         lambda_r: float = 1.0,
+        lambda_sad: float = 1.0,
         lambda_b: float = 0.5,
         lambda_l1: float = 0.01,
-        lambda_neg: float = 0.1,
     ):
         super().__init__()
         self.lambda_c = lambda_c
         self.lambda_r = lambda_r
+        self.lambda_sad = lambda_sad
         self.lambda_b = lambda_b
         self.lambda_l1 = lambda_l1
-        self.lambda_neg = lambda_neg
 
     def forward(
         self,
@@ -44,55 +75,50 @@ class DecomposeLoss(nn.Module):
         """
         Parameters
         ----------
-        c_pred : (B, K_max)
+        c_pred : (B, K_max) — softmax output (sum-to-one, non-negative)
         c_true : (B, K_max)
-        b_pred : (B, N)
-        b_true : (B, N)
-        y      : (B, N) corrupted mixture
-        R      : (B, K_max, N) reference spectra
-        mask   : (B, N) valid wavenumber mask
-        ref_mask : (B, K_max) real reference mask
-
-        Returns
-        -------
-        loss : scalar
-        detail : dict of individual loss components (for logging)
+        b_pred : (B, N) — model's predicted baseline
+        b_true : (B, N) — ground truth baseline
+        y      : (B, N) — corrupted mixture
+        R      : (B, K_max, N) — reference spectra
+        mask   : (B, N) — valid wavenumber mask
+        ref_mask : (B, K_max) — real reference mask
         """
         # 1. Coefficient MAE (only on real references)
         coeff_diff = torch.abs(c_pred - c_true) * ref_mask.float()
         loss_c = coeff_diff.sum() / ref_mask.float().sum().clamp(min=1)
 
-        # 2. Reconstruction: (y - b_true) ≈ sum(c_pred * R)
-        # Use b_true so the baseline head can't absorb the signal.
-        # (B, K, 1) * (B, K, N) → sum over K → (B, N)
-        y_signal = y - b_true  # true signal without baseline
-        y_recon = (c_pred.unsqueeze(-1) * R).sum(dim=1)
+        # 2. Reconstruction: (y - b_pred) ≈ sum(c_pred * R)
+        # Uses b_pred (model's own prediction), NOT b_true.
+        # This forces the model to learn a useful baseline.
+        y_signal = y - b_pred  # model's estimate of clean signal
+        y_recon = (c_pred.unsqueeze(-1) * R).sum(dim=1)  # (B, N)
         recon_diff = (y_signal - y_recon) ** 2 * mask.float()
         loss_r = recon_diff.sum() / mask.float().sum().clamp(min=1)
 
-        # 3. Baseline MAE (on masked points)
+        # 3. SAD (Spectral Angle Distance) — scale-invariant shape matching
+        loss_sad = spectral_angle_distance(y_signal, y_recon, mask)
+
+        # 4. Baseline MAE (supervised)
         base_diff = torch.abs(b_pred - b_true) * mask.float()
         loss_b = base_diff.sum() / mask.float().sum().clamp(min=1)
 
-        # 4. L1 sparsity on coefficients
+        # 5. L1 sparsity on coefficients (encourage distractor suppression)
         loss_l1 = (c_pred * ref_mask.float()).abs().mean()
-
-        # 5. Non-negativity penalty (soft constraint instead of activation)
-        loss_neg = torch.relu(-c_pred * ref_mask.float()).mean()
 
         # Total
         loss = (self.lambda_c * loss_c
                 + self.lambda_r * loss_r
+                + self.lambda_sad * loss_sad
                 + self.lambda_b * loss_b
-                + self.lambda_l1 * loss_l1
-                + self.lambda_neg * loss_neg)
+                + self.lambda_l1 * loss_l1)
 
         detail = {
             "loss": loss.item(),
             "loss_c": loss_c.item(),
             "loss_r": loss_r.item(),
+            "loss_sad": loss_sad.item(),
             "loss_b": loss_b.item(),
             "loss_l1": loss_l1.item(),
-            "loss_neg": loss_neg.item(),
         }
         return loss, detail

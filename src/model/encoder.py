@@ -1,15 +1,17 @@
 """
-Shared spectrum encoder: Conv1D stack + optional Transformer → embedding.
+Mixture-only spectrum encoder: Conv1D stack + Transformer → embedding.
 
-The same encoder processes both the unknown mixture and each reference
-spectrum, so they live in the same representation space.
+v2 changes (based on literature review):
+  - Only the mixture spectrum goes through the encoder (NOT references).
+  - Smaller: d_model=128, 3 conv blocks, 1 transformer layer.
+  - References are used directly in signal space (linear projection only).
+  - This prevents encoder collapse (cosine sim 0.999 between all embeddings).
 
 Architecture:
-    Conv1D(1→32, k=7) + BN + ReLU + MaxPool(4)    → 750 tokens
-    Conv1D(32→64, k=7) + BN + ReLU + MaxPool(4)    → 187 tokens
-    Conv1D(64→128, k=7) + BN + ReLU + MaxPool(4)   → 46 tokens
-    Conv1D(128→d, k=7) + BN + ReLU + MaxPool(4)    → 11 tokens
-    [optional] 2× TransformerEncoderLayer(d, nhead=4)
+    Conv1D(1→32, k=7) + BN + ReLU + MaxPool(4)     → 750 tokens
+    Conv1D(32→64, k=7) + BN + ReLU + MaxPool(4)     → 187 tokens
+    Conv1D(64→d, k=7) + BN + ReLU + MaxPool(4)      → 46 tokens
+    1× TransformerEncoderLayer(d, nhead=4)
     Global Average Pooling → (B, d)
 """
 
@@ -36,8 +38,8 @@ class ConvBlock(nn.Module):
 class SpectrumEncoder(nn.Module):
     def __init__(
         self,
-        d_model: int = 256,
-        n_transformer_layers: int = 2,
+        d_model: int = 128,
+        n_transformer_layers: int = 1,
         n_heads: int = 4,
         dropout: float = 0.1,
     ):
@@ -47,8 +49,7 @@ class SpectrumEncoder(nn.Module):
         self.conv_stack = nn.Sequential(
             ConvBlock(1, 32, kernel=7, pool=4),
             ConvBlock(32, 64, kernel=7, pool=4),
-            ConvBlock(64, 128, kernel=7, pool=4),
-            ConvBlock(128, d_model, kernel=7, pool=4),
+            ConvBlock(64, d_model, kernel=7, pool=4),
         )
 
         self.use_transformer = n_transformer_layers > 0
@@ -66,17 +67,17 @@ class SpectrumEncoder(nn.Module):
         """
         Parameters
         ----------
-        x : (B, N) raw spectrum on the unified grid (3001 points)
+        x : (B, N) raw spectrum on the unified grid
 
         Returns
         -------
         emb : (B, d_model) global embedding
         """
         x = x.unsqueeze(1)  # (B, 1, N) — single channel
-        x = self.conv_stack(x)  # (B, d_model, T) where T ≈ 11
+        x = self.conv_stack(x)  # (B, d_model, T)
 
         if self.use_transformer:
-            x = x.transpose(1, 2)  # (B, T, d_model) — batch_first
+            x = x.transpose(1, 2)  # (B, T, d_model)
             x = self.transformer(x)
             x = x.transpose(1, 2)  # (B, d_model, T)
 

@@ -10,15 +10,14 @@ A deep learning framework for decomposing Raman spectra of unknown mixtures into
 
 - [Motivation](#motivation)
 - [Method Overview](#method-overview)
-- [Architecture](#architecture)
+- [Architecture (v2)](#architecture-v2)
 - [Pipeline: From Data to Evaluation](#pipeline-from-data-to-evaluation)
   - [Stage 1: Data Collection & Preprocessing](#stage-1-data-collection--preprocessing)
   - [Stage 2: Synthetic Mixture Generation](#stage-2-synthetic-mixture-generation)
   - [Stage 3: Classical Baseline (NNLS)](#stage-3-classical-baseline-nnls)
   - [Stage 4: Overfit Sanity Check](#stage-4-overfit-sanity-check)
   - [Stage 5: Full Training](#stage-5-full-training)
-  - [Stage 6: Evaluation & Visualization](#stage-6-evaluation--visualization)
-- [Results](#results)
+- [NNLS Baseline Results](#nnls-baseline-results)
 - [Demo: Unseen Chemicals](#demo-unseen-chemicals)
 - [Project Structure](#project-structure)
 - [Usage](#usage)
@@ -47,53 +46,37 @@ The key insight: rather than training on specific chemicals, we train the model 
 2. **Reference spectra** `R = [r_1, r_2, ..., r_K]` (pure components, possibly including distractors)
 
 And predicts:
-- **Coefficients** `c = [c_1, c_2, ..., c_K]` — the abundance of each reference in the mixture
-- **Baseline** `b` — the polynomial fluorescent background
+- **Coefficients** `c = [c_1, c_2, ..., c_K]` — the abundance of each reference in the mixture (sum-to-one via softmax)
+- **Baseline** `b` — the fluorescent background (always non-negative)
 
 The model never memorizes specific chemicals. At inference, you can swap in completely new reference spectra and the model still works.
 
 ---
 
-## Architecture
+## Architecture (v2)
 
-The model uses a **shared encoder + cross-attention** architecture:
+![Architecture diagram](outputs/figs/architecture_diagram.png)
 
-```
-                    Unknown Spectrum y          Reference Spectra R_1..R_K
-                          |                           |
-                    [Shared Encoder]            [Shared Encoder]
-                    Conv1D Stack +               (same weights)
-                    Transformer                       |
-                          |                           |
-                       z_u (d=256)              z_r (K x d=256)
-                          |                           |
-                          +---- Cross-Attention ------+
-                          |         (query=z_u, key/value=z_r)
-                          |                           |
-                       context                    z_r_i
-                          |                           |
-                          +--- Spectral Features -----+
-                          |    (cos_sim, dot, L2)      |
-                          |                           |
-                    [Per-Reference Scorer MLP]
-                          |
-                     Coefficients c_1..c_K
-                          
-                       z_u ──> [Baseline Head MLP] ──> Polynomial Coefficients ──> Baseline b
-```
+The v2 architecture incorporates key insights from the literature (EGU-Net, PNAS 2024 Georgiev, RamanFormer):
 
-**Shared Encoder:**
-- 4 Conv1D blocks (1→32→64→128→256 channels, kernel=7, MaxPool=4)
-- 2 Transformer encoder layers (4 heads, d=256)
-- Global average pooling → 256-dim embedding
+**Mixture-Only Encoder** (references are NOT encoded through the deep network):
+- 3 Conv1D blocks (1→32→64→128 channels, kernel=7, MaxPool=4)
+- 1 Transformer encoder layer (4 heads, d=128)
+- Global average pooling → 128-dim embedding `z_u`
+
+**Reference Projection** (lightweight, no deep encoder):
+- `Linear(3001, 128) + LayerNorm` → `z_r` (K × 128)
+- This avoids encoder collapse (a problem where shared encoders produce identical embeddings for all references)
 
 **Cross-Attention:** The unknown spectrum queries the references to build a context-aware representation.
 
 **Spectral Similarity Features:** Direct signal-space features (cosine similarity, dot product, L2 distance) bypass the encoder to provide explicit matching signals.
 
-**Scorer:** MLP that takes `[z_r_i, context, spectral_features]` → coefficient for each reference.
+**Scorer:** MLP that takes `[z_r_i, context, spectral_features]` (dim = 2d+3) → logit per reference.
 
-**Baseline Head:** MLP that predicts polynomial coefficients (order 5) → smooth baseline curve.
+**Softmax Output:** Architectural constraint ensuring coefficients are non-negative and sum to one — no soft penalty needed.
+
+**Baseline Head:** MLP on `z_u` → polynomial coefficients (order 5) → smooth non-negative baseline curve.
 
 ---
 
@@ -108,7 +91,7 @@ We collected **115 pure Raman spectra** of food-relevant organic compounds from 
 - **Olive oil dataset** — food-specific Raman spectra
 - **Sugar mixtures** — controlled mixture experiments
 
-All spectra are interpolated to a unified grid (400–1850 cm⁻¹, 1 cm⁻¹ resolution) and L2-normalized.
+All spectra are interpolated to a unified grid (400–3400 cm⁻¹, 1 cm⁻¹ resolution) and L2-normalized.
 
 ![Data exploration: spectral coverage per source](outputs/figs/01_exploration/coverage_per_source.png)
 
@@ -125,7 +108,7 @@ Training data is generated **on-the-fly** — each batch contains fresh, never-b
 3. **Linear superposition**: `y = Σ c_i · r_i`
 4. **Add distractors**: M ∈ [0..5] extra references with true coefficient = 0
 5. **Corrupt** with realistic noise:
-   - Polynomial baseline (order 3–5, simulating fluorescence)
+   - Positive fluorescent baseline (exponential-quadratic bumps, always ≥ 0)
    - Gaussian + Poisson noise (SNR 10–60 dB)
    - Peak shift (±1–3 cm⁻¹)
    - Gaussian broadening (σ ∈ [0.5, 2] cm⁻¹)
@@ -168,15 +151,11 @@ NNLS achieves strong results on synthetic mixtures, providing the performance fl
 
 ### Stage 4: Overfit Sanity Check
 
-Before full training, we verified the architecture can learn by **overfitting to 16 samples**. This confirms the wiring (encoder → cross-attention → scorer → loss) is correct.
+Before full training, we verified the v2 architecture can learn by **overfitting to 16 samples**. This confirms the wiring (encoder → cross-attention → scorer → softmax → loss) is correct.
 
-Result: **loss = 0.000096** after 5000 steps — near-perfect fit.
+Result: **coefficient MAE = 0.00067** after 5000 steps — near-perfect fit.
 
 ![Overfit loss curve](outputs/figs/04_overfit/loss_curve.png)
-
-![Overfit loss components](outputs/figs/04_overfit/loss_components.png)
-
-![Overfit coefficient scatter: predicted vs true](outputs/figs/04_overfit/coeff_scatter.png)
 
 ![Overfit decomposition example](outputs/figs/04_overfit/overfit_example_0.png)
 
@@ -184,7 +163,7 @@ Result: **loss = 0.000096** after 5000 steps — near-perfect fit.
 
 ### Stage 5: Full Training
 
-Training configuration:
+Training configuration (v2):
 - **Optimizer:** Adam (lr=1e-3, cosine decay to 1e-5)
 - **Batch size:** 64, synthetic data generated on-the-fly
 - **Duration:** 100 epochs × 500 steps/epoch = 50,000 gradient steps
@@ -192,62 +171,52 @@ Training configuration:
 - **Holdout:** 20% of chemicals reserved for validation (never seen during training)
 - **Infrastructure:** Run:AI GPU cluster with checkpoint auto-resume (survives preemption)
 
-**Loss function:**
+**Loss function (v2):**
 ```
-L = λ_c · MAE(c_pred, c_true)           coefficient accuracy
-  + λ_r · MSE(y - b_true, Σ c·R)        reconstruction quality
-  + λ_b · MAE(b_pred, b_true)            baseline estimation
-  + λ_l1 · ||c_pred||₁                   sparsity (suppress distractors)
-  + λ_neg · mean(ReLU(-c_pred))          soft non-negativity
+L = λ_c   · MAE(c_pred, c_true)           coefficient accuracy
+  + λ_r   · MSE(y - b_pred, Σ c·R)        reconstruction (uses model's own baseline)
+  + λ_sad · SAD(y - b_pred, Σ c·R)        spectral angle distance (scale-invariant)
+  + λ_b   · MAE(b_pred, b_true)            baseline estimation
+  + λ_l1  · ||c_pred||₁                    sparsity (suppress distractors)
 ```
 
-![Learning curves (run02)](outputs/figs/05_training/run02/learning_curves.png)
+Key v2 changes from v1:
+- Reconstruction uses `b_pred` (model's own baseline), not `b_true` — at inference `b_true` is unavailable
+- Added **SAD loss** (Spectral Angle Distance) for scale-invariant spectral shape matching
+- Removed `λ_neg` penalty — **softmax** handles non-negativity architecturally
+- Smaller model: d=128 (was 256), 1 transformer layer (was 2), 3 conv blocks (was 4)
 
-![Loss components over training](outputs/figs/05_training/run02/loss_components.png)
-
-![Validation vs training loss](outputs/figs/05_training/run02/val_vs_train.png)
+> **Note:** Full v2 training is in progress. Results below show the NNLS baseline on correctly generated synthetic data.
 
 ---
 
-### Stage 6: Evaluation & Visualization
+## NNLS Baseline Results
 
-Comprehensive evaluation following protocols from **EGU-Net** and **RamanFormer** papers:
+### The Decomposition Challenge
 
-**Metrics used:**
-| Metric | Description | DL ↓ better |
-|--------|-------------|:-----------:|
-| MAE | Mean Absolute Error on coefficients | lower |
-| RMSE | Root Mean Square Error | lower |
-| SAD | Spectral Angle Distance | lower |
-| SRE | Signal-to-Reconstruction Error | higher |
-| R² | Coefficient of determination | higher |
-| AUC-ROC | Component detection accuracy | higher |
+Given a corrupted mixture spectrum, recover each component's contribution:
 
-**The decomposition challenge** — given a corrupted mixture, recover each component:
+![The challenge: only the mixture is observed](outputs/figs/07_professional/B1_challenge.png)
 
-![Challenge: corrupted mixture to decompose](outputs/figs/07_professional/B1_challenge.png)
+### NNLS Decomposition
 
-![DL model decomposition result](outputs/figs/07_professional/B2_model_decomposition.png)
+NNLS decomposes the mixture into its components with high accuracy:
 
-![NNLS decomposition result (same mixture)](outputs/figs/07_professional/B3_nnls_decomposition.png)
+![NNLS decomposition with component stacking](outputs/figs/07_professional/B3_nnls_decomposition.png)
 
-![Coefficient comparison: True vs DL vs NNLS](outputs/figs/07_professional/B4_coefficient_comparison.png)
+![Coefficient comparison: True vs NNLS](outputs/figs/07_professional/B4_coefficient_comparison.png)
 
----
+### Comprehensive Metrics (500 holdout samples)
 
-## Results
+![NNLS metrics summary](outputs/figs/07_professional/D1_metrics_comparison.png)
 
-### Comprehensive Metrics (DL vs NNLS)
-
-![Metrics comparison bar chart](outputs/figs/07_professional/D1_metrics_comparison.png)
-
-| Metric | DL Model | NNLS | Winner |
-|--------|----------|------|--------|
-| MAE ↓ | 0.151 | **0.107** | NNLS |
-| RMSE ↓ | 0.208 | **0.159** | NNLS |
-| SAD ↓ | 0.749 | **0.563** | NNLS |
-| R² ↑ | 0.110 | **0.176** | NNLS |
-| AUC-ROC ↑ | 0.620 | **0.742** | NNLS |
+| Metric | NNLS |
+|--------|------|
+| MAE ↓ | 0.093 |
+| RMSE ↓ | 0.139 |
+| SAD ↓ | 0.555 |
+| R² ↑ | 0.240 |
+| AUC-ROC ↑ | 0.737 |
 
 ### ROC Curve — Component Detection
 
@@ -255,7 +224,7 @@ Comprehensive evaluation following protocols from **EGU-Net** and **RamanFormer*
 
 ### Predicted vs True Coefficients
 
-![Scatter plot comparison](outputs/figs/07_professional/D3_scatter_comparison.png)
+![Scatter plot: NNLS predicted vs true](outputs/figs/07_professional/D3_scatter_comparison.png)
 
 ### Robustness Analysis
 
@@ -263,31 +232,15 @@ Comprehensive evaluation following protocols from **EGU-Net** and **RamanFormer*
 
 ![MAE vs K: complexity scaling](outputs/figs/07_professional/D5_mae_vs_K_boxplot.png)
 
-### Per-Sample Improvement
+### MAE Distribution
 
-![Per-sample improvement histogram: DL vs NNLS](outputs/figs/07_professional/D6_improvement_histogram.png)
-
-### Analysis
-
-The NNLS baseline outperforms our DL model on aggregate metrics in this first iteration. This is expected — NNLS directly solves the linear least-squares problem, which is well-suited when the forward model (linear superposition + polynomial baseline) matches the corruption model exactly.
-
-The DL model shows promise in several areas:
-- **Generalizes to unseen chemicals** without any modification
-- **Handles variable K** (number of components) naturally via the attention mechanism
-- **Learns baseline estimation** jointly with decomposition
-- **Wins on ~30% of individual samples**, particularly with complex mixtures
-
-Key directions for improvement:
-1. **Deeper/wider encoder** to better capture spectral features
-2. **Longer training** with curriculum learning (easy→hard)
-3. **Ensemble of models** for uncertainty estimation
-4. **Real mixture data** for fine-tuning
+![NNLS MAE distribution](outputs/figs/07_professional/D6_improvement_histogram.png)
 
 ---
 
 ## Demo: Unseen Chemicals
 
-The model's key selling point: **zero-shot generalization**. These chemicals were held out from training — the model has never seen their spectra:
+The NNLS baseline's performance on **holdout chemicals** — compounds that were completely excluded from the training chemical pool:
 
 ![Demo: unseen chemical mixture 1](outputs/figs/07_professional/C_demo_unseen_0.png)
 
@@ -316,36 +269,30 @@ deep2/
 │   │   ├── nnls.py               # NNLS with polynomial baseline columns
 │   │   └── mcr_als.py            # MCR-ALS wrapper
 │   ├── model/
-│   │   ├── encoder.py            # Conv1D + Transformer shared encoder
-│   │   ├── decompose.py          # Cross-attention + scorer + baseline head
-│   │   └── loss.py               # Multi-component loss (MAE + recon + baseline + L1 + neg)
+│   │   ├── encoder.py            # Conv1D + Transformer (mixture-only encoder)
+│   │   ├── decompose.py          # Cross-attention + scorer + softmax + baseline head
+│   │   └── loss.py               # Multi-component loss (MAE + recon + SAD + baseline + L1)
 │   ├── train.py                  # Full training script (CLI, auto-resume, AMP)
 │   └── eval.py                   # Evaluation utilities & metrics
 ├── configs/
-│   └── base.yaml                 # Training hyperparameters
+│   └── base.yaml                 # Training hyperparameters (v2)
 ├── scripts/
 │   ├── run_notebook02.py         # Synthetic mixture visualization
 │   ├── run_notebook03.py         # Classical baseline evaluation
-│   ├── run_notebook04.py         # Overfit sanity check
-│   ├── run_notebook05.py         # Training monitoring & learning curves
-│   ├── run_notebook06.py         # Model evaluation vs NNLS
-│   ├── run_notebook07_*.py       # Professional decomposition analysis
-│   ├── run_overfit_test.py       # Overfit test execution
-│   ├── run_project_summary.py    # Collect all figures into summary
+│   ├── run_overfit_test.py       # Overfit test execution (v2)
+│   ├── create_architecture_diagram.py  # Architecture diagram generator
+│   ├── regenerate_broken_plots.py      # Plot regeneration with fixed data
 │   └── submit_train.sh           # Run:AI GPU submission script
 ├── data/
 │   ├── raw/                      # Original spectra from databases
 │   ├── processed/                # Preprocessed .npz files on unified grid
 │   └── manifest.csv              # Chemical index with metadata
 ├── outputs/
-│   └── figs/                     # All generated figures (198 PNGs)
+│   └── figs/                     # All generated figures
 │       ├── 01_exploration/       # Data exploration
 │       ├── 02_synth/             # Synthetic mixture construction
 │       ├── 03_baselines/         # NNLS baseline results
-│       ├── 04_overfit/           # Overfit sanity check
-│       ├── 05_training/          # Learning curves
-│       ├── 06_eval/              # Evaluation results
-│       ├── 07_decomposition/     # Detailed per-mixture decomposition
+│       ├── 04_overfit/           # Overfit sanity check (v2)
 │       └── 07_professional/      # Publication-quality figures
 ├── checkpoints/                  # Model weights (not in git)
 └── requirements.txt
@@ -358,7 +305,7 @@ deep2/
 ### Prerequisites
 
 ```bash
-pip install torch numpy scipy pandas matplotlib seaborn pyyaml tqdm tensorboard pymcr
+pip install torch numpy scipy pandas matplotlib seaborn pyyaml tqdm tensorboard pymcr scikit-learn
 ```
 
 ### Training
@@ -368,39 +315,20 @@ pip install torch numpy scipy pandas matplotlib seaborn pyyaml tqdm tensorboard 
 python scripts/run_overfit_test.py
 
 # Full training (GPU recommended)
-python -m src.train --config configs/base.yaml --run_id my_run --max_epochs 100
+python -m src.train --config configs/base.yaml --run_id v2_run01 --max_epochs 100
 
 # Resume interrupted training
-python -m src.train --config configs/base.yaml --run_id my_run  # auto-detects checkpoint
+python -m src.train --config configs/base.yaml --run_id v2_run01  # auto-detects checkpoint
 ```
 
 ### Evaluation
 
 ```bash
-# Generate evaluation plots
-python scripts/run_notebook06.py --run_id my_run
+# Generate NNLS baseline plots
+python scripts/regenerate_broken_plots.py
 
-# Professional decomposition analysis
-python scripts/run_notebook07_professional.py --run_id my_run
-```
-
-### Inference (Custom Mixture)
-
-```python
-from src.eval import load_model_from_checkpoint, predict_batch
-from src.data.synth_mixtures import ChemicalPool, make_fixed_batch
-
-# Load model
-model, info = load_model_from_checkpoint("checkpoints/run02/best.pt", device="cuda")
-
-# Load chemicals and create test mixtures
-pool = ChemicalPool.load()
-samples = make_fixed_batch(pool, n=5, seed=42)
-
-# Predict
-results = predict_batch(model, samples, device="cuda")
-for r in results:
-    print(r["coeffs_pred"])  # predicted coefficients per reference
+# Architecture diagram
+python scripts/create_architecture_diagram.py
 ```
 
 ---
@@ -408,7 +336,8 @@ for r in results:
 ## References
 
 - **EGU-Net:** Qi et al., *"EGU-Net: Endmember Guided Unmixing Network for Hyperspectral Images"* — SAD and RMSE abundance metrics
-- **RamanFormer:** — Transformer-based Raman spectral analysis, MAE/RMSE protocol
+- **Georgiev et al. (PNAS 2024):** Physics-constrained autoencoder for spectral unmixing — softmax output, linear mixing decoder
+- **RamanFormer:** Transformer-based Raman spectral analysis, MAE/RMSE protocol
 - **NNLS:** Lawson & Hanson, *Solving Least Squares Problems* (1995)
 - **MCR-ALS:** Tauler, *"Multivariate Curve Resolution"* (1995)
 

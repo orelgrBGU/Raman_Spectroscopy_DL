@@ -1,14 +1,25 @@
 """
-Decomposition model: shared encoder + cross-attention + coefficient & baseline heads.
+Decomposition model v2: mixture encoder + direct reference matching + physics decoder.
+
+Key changes from v1 (based on EGU-Net, PNAS 2024, RamanFormer literature):
+  1. References are NOT encoded through a deep neural network.
+     Instead, a lightweight linear projection is used. This prevents
+     encoder collapse (v1 had cosine_sim=0.999 between all ref embeddings).
+  2. Coefficients use softmax → architectural sum-to-one + non-negativity.
+     No soft penalty needed.
+  3. The "decoder" is just physics: y_hat = sum(c_i * R_i).
+     The model must reconstruct the mixture from its own predictions.
+  4. Smaller model (d=128 vs 256, 3 conv blocks vs 4, 1 transformer vs 2).
 
 Flow:
-    1. Encode unknown spectrum → z_u (B, d)
-    2. Encode each reference → z_r (B, K, d)   [shared weights with step 1]
-    3. Cross-attention: z_u queries z_r → contextualized unknown (B, 1, d)
-    4. For each reference: concat(z_r_i, context) → MLP → softplus → c_i
-    5. Baseline head: MLP(z_u) → 6 polynomial coefficients → baseline curve
-
-Variable K is handled via padding + a ref_mask that excludes pad slots.
+    1. Encode mixture → z_u (B, d)
+    2. Project each reference with lightweight linear → z_r (B, K, d)
+    3. Compute spectral features in signal space (cos_sim, dot, L2)
+    4. Cross-attention: z_u queries z_r → context
+    5. Scorer MLP([z_r_i, context, spec_feats]) → logit per reference
+    6. Softmax over references → coefficients c (sum-to-one, non-negative)
+    7. Physics decoder: y_hat = sum(c_i * R_i) (no learned params)
+    8. Baseline head: MLP(z_u) → polynomial baseline
 """
 
 from __future__ import annotations
@@ -23,23 +34,31 @@ from .encoder import SpectrumEncoder
 class DecomposeModel(nn.Module):
     def __init__(
         self,
-        d_model: int = 256,
-        n_transformer_layers: int = 2,
+        d_model: int = 128,
+        n_transformer_layers: int = 1,
         n_heads: int = 4,
         dropout: float = 0.1,
         poly_order: int = 5,
+        spectrum_len: int = 3001,
     ):
         super().__init__()
         self.d_model = d_model
         self.poly_order = poly_order
         n_poly = poly_order + 1
 
-        # Shared encoder for unknown + references
+        # Mixture encoder (only for the unknown spectrum)
         self.encoder = SpectrumEncoder(
             d_model=d_model,
             n_transformer_layers=n_transformer_layers,
             n_heads=n_heads,
             dropout=dropout,
+        )
+
+        # Lightweight reference projection (NOT a deep encoder)
+        # Simple linear map from signal space to embedding space
+        self.ref_proj = nn.Sequential(
+            nn.Linear(spectrum_len, d_model),
+            nn.LayerNorm(d_model),
         )
 
         # Cross-attention: unknown (query) attends to references (key/value)
@@ -51,7 +70,7 @@ class DecomposeModel(nn.Module):
         )
 
         # Per-reference coefficient scorer
-        # Input: [z_r, ctx, spectral_features(3)] → coefficient
+        # Input: [z_r, ctx, spectral_features(3)] → logit
         self.scorer = nn.Sequential(
             nn.Linear(2 * d_model + 3, d_model),
             nn.ReLU(inplace=True),
@@ -59,11 +78,11 @@ class DecomposeModel(nn.Module):
             nn.Linear(d_model, 1),
         )
 
-        # Baseline head: unknown embedding → polynomial coefficients
+        # Baseline head: mixture embedding → polynomial coefficients
         self.baseline_head = nn.Sequential(
-            nn.Linear(d_model, 128),
+            nn.Linear(d_model, d_model),
             nn.ReLU(inplace=True),
-            nn.Linear(128, n_poly),
+            nn.Linear(d_model, n_poly),
         )
 
     def forward(
@@ -81,54 +100,46 @@ class DecomposeModel(nn.Module):
 
         Returns
         -------
-        coeffs : (B, K_max) predicted coefficients (≥ 0 via softplus)
+        coeffs : (B, K_max) predicted coefficients (sum-to-one via softmax, ≥ 0)
         baseline : (B, N) predicted baseline polynomial
         """
         B, K_max, N = R.shape
 
-        # 1. Encode unknown
+        # 1. Encode mixture only (NOT references)
         z_u = self.encoder(y)  # (B, d)
 
-        # 2. Encode references (reshape to batch, encode, reshape back)
-        R_flat = R.reshape(B * K_max, N)  # (B*K, N)
-        z_r_flat = self.encoder(R_flat)    # (B*K, d)
-        z_r = z_r_flat.reshape(B, K_max, self.d_model)  # (B, K, d)
+        # 2. Lightweight reference projection (linear, not deep encoder)
+        z_r = self.ref_proj(R)  # (B, K_max, d)
 
-        # 3. Cross-attention: unknown queries references
+        # 3. Cross-attention: mixture queries references
         z_u_q = z_u.unsqueeze(1)  # (B, 1, d)
-        # key_padding_mask: True where padding → invert ref_mask
         key_pad = ~ref_mask if ref_mask is not None else None
         attn_out, _ = self.cross_attn(z_u_q, z_r, z_r, key_padding_mask=key_pad)
         # attn_out: (B, 1, d)
 
-        # 4. Spectral similarity features (computed directly in signal space)
-        # These bypass the encoder and give the scorer direct signal about
-        # which references match the unknown spectrum.
+        # 4. Spectral similarity features (direct signal space — bypass encoder)
         y_exp = y.unsqueeze(1).expand_as(R)  # (B, K, N)
-        # a) cosine similarity
         cos_sim = F.cosine_similarity(y_exp, R, dim=-1, eps=1e-8)  # (B, K)
-        # b) dot product (unnormalized correlation)
         dot_prod = (y_exp * R).sum(dim=-1)  # (B, K)
-        # c) L2 distance (inverse)
         l2_dist = torch.norm(y_exp - R, dim=-1)  # (B, K)
-
         spec_feats = torch.stack([cos_sim, dot_prod, l2_dist], dim=-1)  # (B, K, 3)
 
-        # Score each reference
+        # 5. Score each reference
         ctx = attn_out.expand(-1, K_max, -1)  # (B, K, d)
         combined = torch.cat([z_r, ctx, spec_feats], dim=-1)  # (B, K, 2d+3)
-        coeffs = self.scorer(combined).squeeze(-1)  # (B, K)
-        # No activation — let the model learn raw coefficients.
-        # Non-negativity enforced by loss penalty, not activation.
+        logits = self.scorer(combined).squeeze(-1)  # (B, K)
 
-        # Zero out padding positions
+        # 6. Softmax over valid references → sum-to-one, non-negative
+        # Mask out padding positions with large negative value
         if ref_mask is not None:
-            coeffs = coeffs * ref_mask.float()
+            logits = logits.masked_fill(~ref_mask, -1e9)
+        coeffs = F.softmax(logits, dim=-1)  # (B, K)
+        if ref_mask is not None:
+            coeffs = coeffs * ref_mask.float()  # zero out padding
 
-        # 5. Baseline head
+        # 7. Baseline head
         poly_coeffs = self.baseline_head(z_u)  # (B, n_poly)
         x = torch.linspace(-1.0, 1.0, N, device=y.device, dtype=y.dtype)
-        # powers: (n_poly, N)
         powers = torch.stack([x ** k for k in range(self.poly_order + 1)], dim=0)
         baseline = torch.mm(poly_coeffs, powers)  # (B, N)
 

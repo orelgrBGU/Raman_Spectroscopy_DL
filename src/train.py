@@ -223,9 +223,9 @@ def main():
     criterion = DecomposeLoss(
         lambda_c=lcfg["lambda_c"],
         lambda_r=lcfg["lambda_r"],
+        lambda_sad=lcfg.get("lambda_sad", 1.0),
         lambda_b=lcfg["lambda_b"],
         lambda_l1=lcfg["lambda_l1"],
-        lambda_neg=lcfg["lambda_neg"],
     )
 
     ocfg = cfg["optimizer"]
@@ -372,10 +372,8 @@ def main():
                 )
 
             if tb_writer:
-                tb_writer.add_scalar("train/loss", detail["loss"], global_step)
-                tb_writer.add_scalar("train/loss_c", detail["loss_c"], global_step)
-                tb_writer.add_scalar("train/loss_r", detail["loss_r"], global_step)
-                tb_writer.add_scalar("train/loss_b", detail["loss_b"], global_step)
+                for k, v in detail.items():
+                    tb_writer.add_scalar(f"train/{k}", v, global_step)
 
         # End of epoch
         dt = time.time() - t0

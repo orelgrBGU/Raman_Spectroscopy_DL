@@ -1,12 +1,19 @@
-# ── Training configuration ────────────────────────────────────────────
+# ── Training configuration (v2) ───────────────────────────────────────
+# v2 changes:
+#   - d_model: 256 → 128 (smaller, prevents overparameterization)
+#   - n_transformer_layers: 2 → 1
+#   - Removed lambda_neg (softmax handles non-negativity architecturally)
+#   - Added lambda_sad (spectral angle distance — scale-invariant loss)
+#   - Fixed: baseline positive-only, intensity scaling bug, recon uses b_pred
+#
 # Usage:
-#   python -m src.train --config configs/base.yaml --run_id my_run
-#   python -m src.train --config configs/base.yaml --run_id my_run --max_epochs 5  # override
+#   python -m src.train --config configs/base.yaml --run_id v2_run01
+#   python -m src.train --config configs/base.yaml --run_id v2_run01 --max_epochs 5
 
 # ── Model ─────────────────────────────────────────────────────────────
 model:
-  d_model: 256
-  n_transformer_layers: 2
+  d_model: 128
+  n_transformer_layers: 1
   n_heads: 4
   dropout: 0.1
   poly_order: 5
@@ -15,9 +22,9 @@ model:
 loss:
   lambda_c: 1.0
   lambda_r: 1.0
+  lambda_sad: 1.0
   lambda_b: 0.5
   lambda_l1: 0.01
-  lambda_neg: 0.1
 
 # ── Data / synthetic generator ────────────────────────────────────────
 data:
@@ -25,7 +32,6 @@ data:
   holdout_seed: 0
   batch_size: 64
   num_workers: 0     # 0 = main process (avoids /dev/shm limits in containers)
-  # SynthConfig defaults are used (K 1-8, M 0-5, SNR 10-60 dB, etc.)
 
 # ── Optimizer ─────────────────────────────────────────────────────────
 optimizer:
@@ -34,23 +40,23 @@ optimizer:
 
 # ── Scheduler ─────────────────────────────────────────────────────────
 scheduler:
-  type: cosine        # cosine | step | none
+  type: cosine
   T_max_epochs: null  # defaults to max_epochs
   eta_min: 1.0e-5
 
 # ── Training ──────────────────────────────────────────────────────────
 training:
   max_epochs: 100
-  steps_per_epoch: 500       # synthetic data is infinite; define epoch by step count
-  val_steps: 100             # validation steps per epoch
-  grad_clip: 1.0             # max gradient norm (0 = disabled)
-  amp: true                  # mixed precision (AMP)
+  steps_per_epoch: 500
+  val_steps: 100
+  grad_clip: 1.0
+  amp: true
 
 # ── Checkpointing ────────────────────────────────────────────────────
 checkpoint:
-  dir: checkpoints           # relative to project root
+  dir: checkpoints
   save_every_n_epochs: 5
-  keep_last_n: 3             # rotate old checkpoints
+  keep_last_n: 3
 
 # ── Logging ───────────────────────────────────────────────────────────
 logging:

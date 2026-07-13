@@ -2,7 +2,7 @@
 
 A deep learning framework for decomposing Raman spectra of unknown mixtures into their pure chemical components. Given a mixture spectrum and a set of reference (pure) spectra, the model predicts the concentration coefficient of each component — enabling **generic, reference-swappable** spectral unmixing without retraining.
 
-> **Thesis project** — Ben-Gurion University of the Negev, Department of Electrical and Computer Engineering.
+> **Thesis project** — Ben-Gurion University of the Negev, Department of Industrial Engineering and Management
 
 ---
 

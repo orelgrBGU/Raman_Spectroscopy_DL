@@ -1,0 +1,21 @@
+
+Notebook 05 — Training Monitoring Summary
+==========================================
+Run ID: run02
+Epochs completed: 100
+
+Latest metrics (epoch 100):
+  Train loss:      0.113012
+  Val loss:        0.140231
+  Train coeff MAE: 0.109427
+  Val coeff MAE:   0.133654
+  Train-Val gap:   0.027219 (possible overfitting)
+
+Best validation:
+  Val loss:        0.137696 at epoch 50
+  Val coeff MAE:   0.129659
+
+NNLS baseline MAE: 1.3683
+Model beats NNLS: YES
+
+Figures saved to: /gpfs0/bgu-rgilad/users/orelgr/deep2/outputs/figs/05_training/run02/

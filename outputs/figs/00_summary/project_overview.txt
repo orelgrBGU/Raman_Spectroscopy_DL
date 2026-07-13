@@ -1,0 +1,168 @@
+
+================================================================================
+      Deep Learning for Raman Spectral Decomposition — Project Overview
+================================================================================
+
+GOAL
+----
+Build a generic deep learning model that decomposes an unknown Raman spectrum
+into a linear combination of known reference spectra, estimating both mixing
+coefficients and a polynomial baseline.
+
+Given:  y = sum(c_i * R_i) + baseline + noise
+Find:   c_i (coefficients) and baseline
+
+PIPELINE
+--------
+
+Stage 1 — Data Preparation
+    - Collected pure Raman spectra from RRUFF and SDBS databases
+    - 320 unique chemicals, 4,057 spectra
+    - Unified wavenumber grid: 400-3,400 cm^-1 (3,001 points)
+    - Chemical-level holdout split: 256 train / 64 holdout
+
+Stage 2 — Synthetic Mixture Generator
+    - On-the-fly infinite dataset: no two training samples are identical
+    - K=1-8 components (Dirichlet coefficients) + M=0-5 distractors
+    - Realistic corruptions: polynomial baseline, Gaussian+Poisson noise
+      (SNR 10-60 dB), peak shifts, broadening, intensity scaling
+    - Key figures: construction_8_samples, snr_comparison, distributions
+
+Stage 3 — Classical Baselines
+    - NNLS (Non-Negative Least Squares) with polynomial baseline:
+      Augments reference matrix with +/- polynomial columns, solved via
+      scipy.optimize.nnls. MAE ≈ 0.088, Spearman ≈ 0.55.
+    - MCR-ALS: Blind source separation — wrong paradigm for informed
+      decomposition (MAE = 2.65). Documented as negative finding.
+
+Stage 4 — Model Architecture & Overfit Test
+    - Architecture: Shared Conv1D Encoder + Transformer → embeddings
+      Cross-Attention (unknown queries references) → MLP scorer → coefficients
+      Separate MLP → polynomial baseline
+    - 2.3M parameters (d_model=256, 2 Transformer layers, 4 heads)
+    - Key design decisions:
+      * Removed softplus activation (caused gradient collapse, loss stuck at 0.16)
+      * Decoupled reconstruction loss from baseline (prevents baseline absorbing signal)
+      * Soft non-negativity penalty instead of hard constraint
+    - Overfit test: 16 samples → loss 0.0001 in 5000 steps ✓
+
+Stage 5 — Training
+    - 100 epochs × 500 steps × batch_size=64 = 3.2M unique mixtures
+    - Adam optimizer + cosine LR schedule (1e-3 → 1e-5)
+    - Mixed precision (AMP) on NVIDIA L40S GPU
+    - Auto-resume from checkpoint (survives preemption)
+
+Stage 6 — Evaluation
+    - 500 synthetic mixtures from holdout chemicals (unseen)
+    - Head-to-head comparison with NNLS baseline
+    - Metrics: MAE, Spearman correlation, reconstruction MSE
+    - Analysis by SNR level and mixture complexity (K)
+
+
+============================================================
+
+Notebook 04 — Overfit Test Summary
+===================================
+Date: auto-generated
+Device: cuda
+Model: DecomposeModel, 2,311,431 parameters
+  - d_model=256, 2 Transformer layers, 4 heads
+  - Coefficient activation: none (raw linear + soft non-negativity penalty)
+  - Baseline: degree-5 polynomial
+
+Training:
+  - 16 fixed samples, 5000 steps, Adam lr=0.001
+  - Cosine LR schedule (1e-3 -> 1e-5)
+
+Results:
+  - Final total loss: 0.000096
+  - Final coeff MAE:  0.000052
+  - Final recon MSE:  0.000036
+  - Final baseline MAE: 0.000015
+  - Coeff scatter MAE: 0.124059
+  - Result: PASS
+
+Design decisions validated:
+  1. Shared encoder for unknown + references works correctly
+  2. Cross-attention mechanism successfully routes information
+  3. Variable-K handling (padding + ref_mask) functions properly
+  4. Combined loss (MAE + reconstruction + baseline) drives convergence
+  5. Removing softplus activation was critical for gradient flow
+
+Figures saved to: /gpfs0/bgu-rgilad/users/orelgr/deep2/outputs/figs/04_overfit/
+
+============================================================
+
+Notebook 05 — Training Monitoring Summary
+==========================================
+Run ID: run02
+Epochs completed: 100
+
+Latest metrics (epoch 100):
+  Train loss:      0.113012
+  Val loss:        0.140231
+  Train coeff MAE: 0.109427
+  Val coeff MAE:   0.133654
+  Train-Val gap:   0.027219 (possible overfitting)
+
+Best validation:
+  Val loss:        0.137696 at epoch 50
+  Val coeff MAE:   0.129659
+
+NNLS baseline MAE: 1.3683
+Model beats NNLS: YES
+
+Figures saved to: /gpfs0/bgu-rgilad/users/orelgr/deep2/outputs/figs/05_training/run02/
+
+============================================================
+
+Notebook 06 — Model Evaluation Summary
+========================================
+
+Evaluation Setup:
+  Checkpoint: best.pt (epoch 50)
+  Holdout chemicals: 64 (never seen in training)
+  Test samples: 500
+  K range: 1-8, SNR range: 10-60 dB
+
+Results:
+  ┌─────────────┬───────────────┬───────────────┐
+  │ Metric      │ DL Model      │ NNLS          │
+  ├─────────────┼───────────────┼───────────────┤
+  │ MAE (mean)  │ 0.1511 +/- 0.0939 │ 0.1071 +/- 0.1099 │
+  │ MAE (median)│ 0.1218         │ 0.0764         │
+  │ Spearman    │ 0.279          │ 0.504          │
+  │ Recon MSE   │ 0.000479      │ 0.000012      │
+  └─────────────┴───────────────┴───────────────┘
+
+  Winner: NNLS
+  Model beats NNLS in 30% of samples
+  Mean improvement: -0.0441
+
+Figures saved to: /gpfs0/bgu-rgilad/users/orelgr/deep2/outputs/figs/06_eval/
+
+================================================================================
+  Code structure:
+    deep2/
+    ├── data/processed/          — preprocessed spectra stacks
+    ├── configs/base.yaml        — training hyperparameters
+    ├── src/
+    │   ├── data/synth_mixtures.py  — synthetic mixture generator
+    │   ├── model/
+    │   │   ├── encoder.py          — Conv1D + Transformer encoder
+    │   │   ├── decompose.py        — full DecomposeModel
+    │   │   └── loss.py             — combined loss function
+    │   ├── baselines/nnls.py       — NNLS baseline
+    │   ├── train.py                — training script
+    │   └── eval.py                 — evaluation utilities
+    ├── scripts/
+    │   ├── run_notebook02.py       — synthetic data sanity check
+    │   ├── run_notebook03.py       — classical baselines
+    │   ├── run_notebook04.py       — overfit test documentation
+    │   ├── run_notebook05.py       — training monitoring
+    │   ├── run_notebook06.py       — model evaluation
+    │   └── run_project_summary.py  — this file
+    ├── checkpoints/                — saved model weights
+    ├── logs/                       — training logs
+    └── outputs/figs/               — all generated figures
+================================================================================

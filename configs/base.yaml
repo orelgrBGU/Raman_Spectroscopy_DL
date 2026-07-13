@@ -1,0 +1,59 @@
+# ── Training configuration ────────────────────────────────────────────
+# Usage:
+#   python -m src.train --config configs/base.yaml --run_id my_run
+#   python -m src.train --config configs/base.yaml --run_id my_run --max_epochs 5  # override
+
+# ── Model ─────────────────────────────────────────────────────────────
+model:
+  d_model: 256
+  n_transformer_layers: 2
+  n_heads: 4
+  dropout: 0.1
+  poly_order: 5
+
+# ── Loss ──────────────────────────────────────────────────────────────
+loss:
+  lambda_c: 1.0
+  lambda_r: 1.0
+  lambda_b: 0.5
+  lambda_l1: 0.01
+  lambda_neg: 0.1
+
+# ── Data / synthetic generator ────────────────────────────────────────
+data:
+  holdout_frac: 0.2
+  holdout_seed: 0
+  batch_size: 64
+  num_workers: 0     # 0 = main process (avoids /dev/shm limits in containers)
+  # SynthConfig defaults are used (K 1-8, M 0-5, SNR 10-60 dB, etc.)
+
+# ── Optimizer ─────────────────────────────────────────────────────────
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 0.0
+
+# ── Scheduler ─────────────────────────────────────────────────────────
+scheduler:
+  type: cosine        # cosine | step | none
+  T_max_epochs: null  # defaults to max_epochs
+  eta_min: 1.0e-5
+
+# ── Training ──────────────────────────────────────────────────────────
+training:
+  max_epochs: 100
+  steps_per_epoch: 500       # synthetic data is infinite; define epoch by step count
+  val_steps: 100             # validation steps per epoch
+  grad_clip: 1.0             # max gradient norm (0 = disabled)
+  amp: true                  # mixed precision (AMP)
+
+# ── Checkpointing ────────────────────────────────────────────────────
+checkpoint:
+  dir: checkpoints           # relative to project root
+  save_every_n_epochs: 5
+  keep_last_n: 3             # rotate old checkpoints
+
+# ── Logging ───────────────────────────────────────────────────────────
+logging:
+  print_every_n_steps: 50
+  tensorboard: true
+  csv: true

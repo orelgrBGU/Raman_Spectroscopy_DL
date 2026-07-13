@@ -1,0 +1,30 @@
+
+Notebook 04 — Overfit Test Summary
+===================================
+Date: auto-generated
+Device: cuda
+Model: DecomposeModel, 2,311,431 parameters
+  - d_model=256, 2 Transformer layers, 4 heads
+  - Coefficient activation: none (raw linear + soft non-negativity penalty)
+  - Baseline: degree-5 polynomial
+
+Training:
+  - 16 fixed samples, 5000 steps, Adam lr=0.001
+  - Cosine LR schedule (1e-3 -> 1e-5)
+
+Results:
+  - Final total loss: 0.000096
+  - Final coeff MAE:  0.000052
+  - Final recon MSE:  0.000036
+  - Final baseline MAE: 0.000015
+  - Coeff scatter MAE: 0.124059
+  - Result: PASS
+
+Design decisions validated:
+  1. Shared encoder for unknown + references works correctly
+  2. Cross-attention mechanism successfully routes information
+  3. Variable-K handling (padding + ref_mask) functions properly
+  4. Combined loss (MAE + reconstruction + baseline) drives convergence
+  5. Removing softplus activation was critical for gradient flow
+
+Figures saved to: /gpfs0/bgu-rgilad/users/orelgr/deep2/outputs/figs/04_overfit/

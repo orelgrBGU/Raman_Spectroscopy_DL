@@ -1,0 +1,20 @@
+# Data (too large for git)
+data/processed/
+data/raw/
+
+# Model checkpoints (too large)
+checkpoints/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# OS
+.DS_Store
+
+# Env
+.env

@@ -1,0 +1,25 @@
+
+Notebook 06 — Model Evaluation Summary
+========================================
+
+Evaluation Setup:
+  Checkpoint: best.pt (epoch 50)
+  Holdout chemicals: 64 (never seen in training)
+  Test samples: 500
+  K range: 1-8, SNR range: 10-60 dB
+
+Results:
+  ┌─────────────┬───────────────┬───────────────┐
+  │ Metric      │ DL Model      │ NNLS          │
+  ├─────────────┼───────────────┼───────────────┤
+  │ MAE (mean)  │ 0.1511 +/- 0.0939 │ 0.1071 +/- 0.1099 │
+  │ MAE (median)│ 0.1218         │ 0.0764         │
+  │ Spearman    │ 0.279          │ 0.504          │
+  │ Recon MSE   │ 0.000479      │ 0.000012      │
+  └─────────────┴───────────────┴───────────────┘
+
+  Winner: NNLS
+  Model beats NNLS in 30% of samples
+  Mean improvement: -0.0441
+
+Figures saved to: /gpfs0/bgu-rgilad/users/orelgr/deep2/outputs/figs/06_eval/

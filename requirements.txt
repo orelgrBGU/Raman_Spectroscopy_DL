@@ -1,0 +1,14 @@
+numpy>=1.26
+scipy>=1.11
+pandas>=2.0
+matplotlib>=3.8
+seaborn>=0.13
+pyyaml>=6.0
+tqdm>=4.66
+tensorboard>=2.15
+pymcr>=0.5
+requests>=2.31
+beautifulsoup4>=4.12
+jupyter>=1.0
+ipykernel>=6.29
+scikit-learn>=1.3

@@ -1,4 +1,4 @@
-Evaluation Summary — DL v3 vs NNLS
+Evaluation Summary — DL v3 vs NNLS (with all comparison plots)
 ==================================================
 Checkpoint: best.pt (epoch 94)
 Holdout chemicals: 64
@@ -6,8 +6,11 @@ Test samples: 500
 
 Metric                         DL v3            NNLS
 --------------------------------------------------
-MAE (mean)                    0.1234          0.0937
-MAE (median)                  0.0983          0.0634
-Spearman                       0.513           0.483
-Recon MSE                   0.000078        0.000022
-DL win rate                    40.6%
+MAE (mean)                    0.1219          0.0930
+MAE (median)                  0.0892          0.0627
+RMSE                          0.1646          0.1393
+SAD                           0.5451          0.5547
+R²                            0.4236          0.2399
+AUC-ROC                       0.7594          0.7370
+Spearman                       0.494           0.517
+DL win rate                    38.8%

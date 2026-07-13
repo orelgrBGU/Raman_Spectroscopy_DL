@@ -200,12 +200,16 @@ L = λ_c    · MAE(c_pred, c_true)           coefficient accuracy        (λ=1.0
 
 | Metric | DL v2 (softmax) | **DL v3 (softplus)** | NNLS |
 |--------|:---:|:---:|:---:|
-| MAE (mean) ↓ | 0.1511 | **0.1234** | **0.0937** |
-| MAE (median) ↓ | 0.1218 | **0.0983** | **0.0634** |
-| Spearman ↑ | 0.279 | **0.513** | 0.483 |
-| DL win rate | 30% | **40.6%** | — |
+| MAE (mean) ↓ | 0.1511 | **0.1219** | **0.0930** |
+| MAE (median) ↓ | 0.1218 | **0.0892** | **0.0627** |
+| RMSE ↓ | — | 0.1646 | **0.1393** |
+| SAD ↓ | — | **0.5451** | 0.5547 |
+| R² ↑ | — | **0.4236** | 0.2399 |
+| AUC-ROC ↑ | — | **0.7594** | 0.7370 |
+| Spearman ↑ | 0.279 | 0.494 | **0.517** |
+| DL win rate | 30% | **38.8%** | — |
 
-v3 achieves the **highest Spearman rank correlation** (0.513 > NNLS 0.483), meaning it predicts the **relative ordering** of component contributions better than NNLS. NNLS still wins on absolute MAE due to its direct per-sample optimization.
+DL v3 achieves the **best R² (0.424 vs 0.240)** and **best AUC-ROC (0.759 vs 0.737)**, meaning it has better overall coefficient fit and component detection accuracy. It also wins on **SAD** (spectral angle distance). NNLS still leads on MAE, RMSE, and Spearman due to its direct per-sample optimization.
 
 ### Coefficient Scatter: Predicted vs True
 
@@ -217,9 +221,17 @@ v3 achieves the **highest Spearman rank correlation** (0.513 > NNLS 0.483), mean
 
 ![Spearman comparison](outputs/figs/06_eval_v3/spearman_comparison_bar.png)
 
+### ROC Curve — Component Detection
+
+![ROC curve](outputs/figs/06_eval_v3/roc_curve.png)
+
 ### Robustness: MAE vs Number of Components
 
 ![MAE vs K](outputs/figs/06_eval_v3/mae_vs_K.png)
+
+### Robustness: MAE vs SNR (Noise Level)
+
+![MAE vs SNR](outputs/figs/06_eval_v3/mae_vs_snr.png)
 
 ### Per-Sample Improvement Distribution
 
@@ -241,7 +253,7 @@ Cases where NNLS outperforms DL v3:
 
 ---
 
-## NNLS Baseline Results
+## Detailed Comparison: DL v3 vs NNLS
 
 ### The Decomposition Challenge
 
@@ -249,43 +261,52 @@ Given a corrupted mixture spectrum, recover each component's contribution:
 
 ![The challenge: only the mixture is observed](outputs/figs/07_professional/B1_challenge.png)
 
+### DL v3 Model Decomposition
+
+The deep learning model decomposes the mixture using cross-attention between the mixture embedding and reference projections:
+
+![DL v3 decomposition](outputs/figs/07_professional/B2_model_decomposition.png)
+
 ### NNLS Decomposition
 
-NNLS decomposes the mixture into its components with high accuracy:
+NNLS decomposes the mixture by directly solving the linear system per-sample:
 
 ![NNLS decomposition with component stacking](outputs/figs/07_professional/B3_nnls_decomposition.png)
 
-![Coefficient comparison: True vs NNLS](outputs/figs/07_professional/B4_coefficient_comparison.png)
+### Coefficient Comparison: True vs DL v3 vs NNLS
+
+![Coefficient comparison: True vs DL v3 vs NNLS](outputs/figs/07_professional/B4_coefficient_comparison.png)
 
 ### Comprehensive Metrics (500 holdout samples)
 
-![NNLS metrics summary](outputs/figs/07_professional/D1_metrics_comparison.png)
+![Metrics comparison DL v3 vs NNLS](outputs/figs/07_professional/D1_metrics_comparison.png)
 
-| Metric | NNLS |
-|--------|------|
-| MAE ↓ | 0.093 |
-| RMSE ↓ | 0.139 |
-| SAD ↓ | 0.555 |
-| R² ↑ | 0.240 |
-| AUC-ROC ↑ | 0.737 |
+| Metric | DL v3 | NNLS |
+|--------|:---:|:---:|
+| MAE ↓ | 0.122 | **0.093** |
+| RMSE ↓ | 0.165 | **0.139** |
+| SAD ↓ | **0.545** | 0.555 |
+| R² ↑ | **0.424** | 0.240 |
+| AUC-ROC ↑ | **0.759** | 0.737 |
+| Spearman ↑ | 0.494 | **0.517** |
 
 ### ROC Curve — Component Detection
 
-![ROC curve for component detection](outputs/figs/07_professional/D2_roc_curve.png)
+![ROC curve: DL v3 vs NNLS](outputs/figs/07_professional/D2_roc_curve.png)
 
 ### Predicted vs True Coefficients
 
-![Scatter plot: NNLS predicted vs true](outputs/figs/07_professional/D3_scatter_comparison.png)
+![Scatter: DL v3 vs NNLS predicted vs true](outputs/figs/07_professional/D3_scatter_comparison.png)
 
 ### Robustness Analysis
 
-![MAE vs SNR: noise robustness](outputs/figs/07_professional/D4_mae_vs_snr.png)
+![MAE vs SNR: DL v3 vs NNLS noise robustness](outputs/figs/07_professional/D4_mae_vs_snr.png)
 
-![MAE vs K: complexity scaling](outputs/figs/07_professional/D5_mae_vs_K_boxplot.png)
+![MAE vs K: DL v3 vs NNLS complexity scaling](outputs/figs/07_professional/D5_mae_vs_K_boxplot.png)
 
 ### MAE Distribution
 
-![NNLS MAE distribution](outputs/figs/07_professional/D6_improvement_histogram.png)
+![MAE distribution: DL v3 vs NNLS](outputs/figs/07_professional/D6_improvement_histogram.png)
 
 ---
 
@@ -315,7 +336,7 @@ Example coefficient comparisons on real sugar mixtures:
 
 ## Demo: Unseen Chemicals
 
-The NNLS baseline's performance on **holdout chemicals** — compounds that were completely excluded from the training chemical pool:
+Both methods tested on **holdout chemicals** — compounds completely excluded from the training chemical pool. Each plot shows True coefficients, DL v3, and NNLS predictions:
 
 ![Demo: unseen chemical mixture 1](outputs/figs/07_professional/C_demo_unseen_0.png)
 

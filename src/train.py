@@ -226,6 +226,7 @@ def main():
         lambda_sad=lcfg.get("lambda_sad", 1.0),
         lambda_b=lcfg["lambda_b"],
         lambda_l1=lcfg["lambda_l1"],
+        lambda_bneg=lcfg.get("lambda_bneg", 10.0),
     )
 
     ocfg = cfg["optimizer"]
@@ -288,7 +289,9 @@ def main():
             csv_writer.writerow([
                 "epoch", "step", "lr",
                 "train_loss", "train_loss_c", "train_loss_r", "train_loss_b",
+                "train_loss_l1", "train_loss_bneg",
                 "val_loss", "val_loss_c", "val_loss_r", "val_loss_b",
+                "val_loss_l1", "val_loss_bneg",
             ])
 
     tb_writer = None
@@ -319,7 +322,7 @@ def main():
             break
 
         model.train()
-        epoch_losses = {k: 0.0 for k in ["loss", "loss_c", "loss_r", "loss_b"]}
+        epoch_losses = {k: 0.0 for k in ["loss", "loss_c", "loss_r", "loss_b", "loss_l1", "loss_bneg"]}
         t0 = time.time()
 
         for step_in_epoch in range(1, steps_per_epoch + 1):
@@ -368,7 +371,7 @@ def main():
                     f"  [{epoch+1:3d}/{max_epochs}] step {step_in_epoch:4d}/{steps_per_epoch}  "
                     f"loss={detail['loss']:.5f}  c={detail['loss_c']:.5f}  "
                     f"r={detail['loss_r']:.6f}  b={detail['loss_b']:.6f}  "
-                    f"lr={lr_now:.2e}"
+                    f"bneg={detail['loss_bneg']:.6f}  lr={lr_now:.2e}"
                 )
 
             if tb_writer:
@@ -380,12 +383,14 @@ def main():
         avg = {k: v / steps_per_epoch for k, v in epoch_losses.items()}
         print(f"\n  Epoch {epoch+1} done in {dt:.1f}s — "
               f"avg loss={avg['loss']:.5f}  c={avg['loss_c']:.5f}  "
-              f"r={avg['loss_r']:.6f}  b={avg['loss_b']:.6f}")
+              f"r={avg['loss_r']:.6f}  b={avg['loss_b']:.6f}  "
+              f"bneg={avg['loss_bneg']:.6f}")
 
         # ── Validation ────────────────────────────────────────────────
         val_detail = validate(model, val_batch, criterion, device)
         print(f"  Val: loss={val_detail['loss']:.5f}  c={val_detail['loss_c']:.5f}  "
-              f"r={val_detail['loss_r']:.6f}  b={val_detail['loss_b']:.6f}")
+              f"r={val_detail['loss_r']:.6f}  b={val_detail['loss_b']:.6f}  "
+              f"bneg={val_detail['loss_bneg']:.6f}")
 
         if tb_writer:
             for k, v in val_detail.items():
@@ -397,8 +402,10 @@ def main():
                 epoch + 1, global_step, f"{lr_now:.6e}",
                 f"{avg['loss']:.6f}", f"{avg['loss_c']:.6f}",
                 f"{avg['loss_r']:.6f}", f"{avg['loss_b']:.6f}",
+                f"{avg['loss_l1']:.6f}", f"{avg['loss_bneg']:.6f}",
                 f"{val_detail['loss']:.6f}", f"{val_detail['loss_c']:.6f}",
                 f"{val_detail['loss_r']:.6f}", f"{val_detail['loss_b']:.6f}",
+                f"{val_detail['loss_l1']:.6f}", f"{val_detail['loss_bneg']:.6f}",
             ])
             csv_file.flush()
 

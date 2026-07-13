@@ -1,19 +1,20 @@
 """
-Combined loss for spectral decomposition (v2).
+Combined loss for spectral decomposition (v3).
 
-v2 changes (based on literature review):
-  1. Reconstruction uses b_pred (NOT b_true). At inference b_true is unavailable,
-     so the model must learn to use its own baseline prediction.
-  2. Added SAD (Spectral Angle Distance) — scale-invariant spectral shape loss.
-     Used by EGU-Net, PNAS 2024 autoencoder papers.
-  3. Removed lambda_neg — coefficients now use softmax (architecturally non-negative).
-  4. Kept L1 sparsity on coefficients (important for distractor suppression).
+v3 changes:
+  1. Increased lambda_r (reconstruction) — with softplus coefficients (no sum-to-1
+     constraint), reconstruction loss provides essential physics regularization
+     that prevents coefficient drift.
+  2. Increased lambda_l1 (sparsity) — with softplus, coefficients are unbounded
+     above; stronger L1 drives distractors to zero and prevents over-estimation.
+  3. All v2 improvements kept: b_pred in reconstruction, SAD loss.
 
-L = lambda_c   * MAE(c_pred, c_true)
-  + lambda_r   * MSE(y - b_pred, c_pred @ R)     reconstruction with MODEL's baseline
-  + lambda_sad * SAD(y - b_pred, c_pred @ R)      spectral angle distance
-  + lambda_b   * MAE(b_pred, b_true)              baseline supervision
-  + lambda_l1  * L1(c_pred)                       sparsity
+L = lambda_c    * MAE(c_pred, c_true)
+  + lambda_r    * MSE(y - b_pred, c_pred @ R)     reconstruction with MODEL's baseline
+  + lambda_sad  * SAD(y - b_pred, c_pred @ R)      spectral angle distance
+  + lambda_b    * MAE(b_pred, b_true)              baseline supervision
+  + lambda_l1   * L1(c_pred)                       sparsity (stronger for softplus)
+  + lambda_bneg * mean(relu(-b_pred))              soft non-negativity for baseline
 """
 
 from __future__ import annotations
@@ -49,10 +50,11 @@ class DecomposeLoss(nn.Module):
     def __init__(
         self,
         lambda_c: float = 1.0,
-        lambda_r: float = 1.0,
+        lambda_r: float = 50.0,
         lambda_sad: float = 1.0,
         lambda_b: float = 0.5,
-        lambda_l1: float = 0.01,
+        lambda_l1: float = 0.1,
+        lambda_bneg: float = 10.0,
     ):
         super().__init__()
         self.lambda_c = lambda_c
@@ -60,6 +62,7 @@ class DecomposeLoss(nn.Module):
         self.lambda_sad = lambda_sad
         self.lambda_b = lambda_b
         self.lambda_l1 = lambda_l1
+        self.lambda_bneg = lambda_bneg
 
     def forward(
         self,
@@ -75,7 +78,7 @@ class DecomposeLoss(nn.Module):
         """
         Parameters
         ----------
-        c_pred : (B, K_max) — softmax output (sum-to-one, non-negative)
+        c_pred : (B, K_max) — softplus output (non-negative, independent)
         c_true : (B, K_max)
         b_pred : (B, N) — model's predicted baseline
         b_true : (B, N) — ground truth baseline
@@ -106,12 +109,17 @@ class DecomposeLoss(nn.Module):
         # 5. L1 sparsity on coefficients (encourage distractor suppression)
         loss_l1 = (c_pred * ref_mask.float()).abs().mean()
 
+        # 6. Soft non-negativity penalty for baseline
+        # (fluorescence is always additive; ReLU kills gradients so we use soft penalty)
+        loss_bneg = torch.relu(-b_pred).mean()
+
         # Total
         loss = (self.lambda_c * loss_c
                 + self.lambda_r * loss_r
                 + self.lambda_sad * loss_sad
                 + self.lambda_b * loss_b
-                + self.lambda_l1 * loss_l1)
+                + self.lambda_l1 * loss_l1
+                + self.lambda_bneg * loss_bneg)
 
         detail = {
             "loss": loss.item(),
@@ -120,5 +128,6 @@ class DecomposeLoss(nn.Module):
             "loss_sad": loss_sad.item(),
             "loss_b": loss_b.item(),
             "loss_l1": loss_l1.item(),
+            "loss_bneg": loss_bneg.item(),
         }
         return loss, detail

@@ -1,15 +1,18 @@
 """
-Decomposition model v2: mixture encoder + direct reference matching + physics decoder.
+Decomposition model v3: softplus coefficients + non-negative baseline.
 
-Key changes from v1 (based on EGU-Net, PNAS 2024, RamanFormer literature):
-  1. References are NOT encoded through a deep neural network.
-     Instead, a lightweight linear projection is used. This prevents
-     encoder collapse (v1 had cosine_sim=0.999 between all ref embeddings).
-  2. Coefficients use softmax → architectural sum-to-one + non-negativity.
-     No soft penalty needed.
-  3. The "decoder" is just physics: y_hat = sum(c_i * R_i).
-     The model must reconstruct the mixture from its own predictions.
-  4. Smaller model (d=128 vs 256, 3 conv blocks vs 4, 1 transformer vs 2).
+Key changes from v2:
+  1. Coefficients use softplus instead of softmax.
+     softmax forced sum-to-one across ALL references (including distractors),
+     making it impossible to give true zero to absent components.
+     softplus gives independent non-negative coefficients — each reference
+     can be pushed to zero without affecting others.
+  2. Baseline output is clamped non-negative (ReLU).
+     Real fluorescence baselines are always additive; the model should
+     never predict negative baseline.
+  3. Everything else from v2 stays: lightweight ref projection,
+     mixture-only deep encoder, cross-attention, spectral features,
+     physics decoder.
 
 Flow:
     1. Encode mixture → z_u (B, d)
@@ -17,9 +20,9 @@ Flow:
     3. Compute spectral features in signal space (cos_sim, dot, L2)
     4. Cross-attention: z_u queries z_r → context
     5. Scorer MLP([z_r_i, context, spec_feats]) → logit per reference
-    6. Softmax over references → coefficients c (sum-to-one, non-negative)
+    6. softplus per reference → independent non-negative coefficients
     7. Physics decoder: y_hat = sum(c_i * R_i) (no learned params)
-    8. Baseline head: MLP(z_u) → polynomial baseline
+    8. Baseline head: MLP(z_u) → polynomial → ReLU (non-negative)
 """
 
 from __future__ import annotations
@@ -100,8 +103,8 @@ class DecomposeModel(nn.Module):
 
         Returns
         -------
-        coeffs : (B, K_max) predicted coefficients (sum-to-one via softmax, ≥ 0)
-        baseline : (B, N) predicted baseline polynomial
+        coeffs : (B, K_max) predicted coefficients (softplus, ≥ 0, independent)
+        baseline : (B, N) predicted baseline polynomial (≥ 0)
         """
         B, K_max, N = R.shape
 
@@ -129,15 +132,15 @@ class DecomposeModel(nn.Module):
         combined = torch.cat([z_r, ctx, spec_feats], dim=-1)  # (B, K, 2d+3)
         logits = self.scorer(combined).squeeze(-1)  # (B, K)
 
-        # 6. Softmax over valid references → sum-to-one, non-negative
-        # Mask out padding positions with large negative value
-        if ref_mask is not None:
-            logits = logits.masked_fill(~ref_mask, -1e9)
-        coeffs = F.softmax(logits, dim=-1)  # (B, K)
+        # 6. Softplus per reference → independent non-negative coefficients
+        # Unlike softmax, each coefficient is independent: distractors can
+        # be pushed to true zero without affecting in-mixture coefficients.
+        coeffs = F.softplus(logits)  # (B, K), each ≥ 0
         if ref_mask is not None:
             coeffs = coeffs * ref_mask.float()  # zero out padding
 
-        # 7. Baseline head
+        # 7. Baseline head — unconstrained polynomial; non-negativity enforced
+        #    via soft penalty in loss (ReLU kills gradients for small baselines)
         poly_coeffs = self.baseline_head(z_u)  # (B, n_poly)
         x = torch.linspace(-1.0, 1.0, N, device=y.device, dtype=y.dtype)
         powers = torch.stack([x ** k for k in range(self.poly_order + 1)], dim=0)

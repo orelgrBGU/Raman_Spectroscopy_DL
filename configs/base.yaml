@@ -1,14 +1,14 @@
-# ── Training configuration (v2) ───────────────────────────────────────
-# v2 changes:
-#   - d_model: 256 → 128 (smaller, prevents overparameterization)
-#   - n_transformer_layers: 2 → 1
-#   - Removed lambda_neg (softmax handles non-negativity architecturally)
-#   - Added lambda_sad (spectral angle distance — scale-invariant loss)
-#   - Fixed: baseline positive-only, intensity scaling bug, recon uses b_pred
+# ── Training configuration (v3) ───────────────────────────────────────
+# v3 changes:
+#   - Coefficients: softmax → softplus (independent, no sum-to-1 constraint)
+#     Enables true zero for distractors without affecting in-mixture coeffs.
+#   - Baseline: polynomial → ReLU enforced non-negative
+#   - lambda_r: 1.0 → 50.0 (reconstruction was negligible; now physics-driven)
+#   - lambda_l1: 0.01 → 0.1 (stronger sparsity for softplus coefficients)
 #
 # Usage:
-#   python -m src.train --config configs/base.yaml --run_id v2_run01
-#   python -m src.train --config configs/base.yaml --run_id v2_run01 --max_epochs 5
+#   python -m src.train --config configs/base.yaml --run_id v3_run01
+#   python -m src.train --config configs/base.yaml --run_id v3_run01 --max_epochs 5
 
 # ── Model ─────────────────────────────────────────────────────────────
 model:
@@ -21,10 +21,11 @@ model:
 # ── Loss ──────────────────────────────────────────────────────────────
 loss:
   lambda_c: 1.0
-  lambda_r: 1.0
+  lambda_r: 50.0
   lambda_sad: 1.0
   lambda_b: 0.5
-  lambda_l1: 0.01
+  lambda_l1: 0.1
+  lambda_bneg: 10.0
 
 # ── Data / synthetic generator ────────────────────────────────────────
 data:

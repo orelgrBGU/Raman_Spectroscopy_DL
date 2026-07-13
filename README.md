@@ -10,17 +10,20 @@ A deep learning framework for decomposing Raman spectra of unknown mixtures into
 
 - [Motivation](#motivation)
 - [Method Overview](#method-overview)
-- [Architecture (v2)](#architecture-v2)
+- [Architecture (v3)](#architecture-v3)
 - [Pipeline: From Data to Evaluation](#pipeline-from-data-to-evaluation)
   - [Stage 1: Data Collection & Preprocessing](#stage-1-data-collection--preprocessing)
   - [Stage 2: Synthetic Mixture Generation](#stage-2-synthetic-mixture-generation)
   - [Stage 3: Classical Baseline (NNLS)](#stage-3-classical-baseline-nnls)
   - [Stage 4: Overfit Sanity Check](#stage-4-overfit-sanity-check)
-  - [Stage 5: Full Training](#stage-5-full-training)
+  - [Stage 5: Full Training (v3)](#stage-5-full-training-v3)
+- [Results: DL v3 vs NNLS](#results-dl-v3-vs-nnls)
 - [NNLS Baseline Results](#nnls-baseline-results)
+- [Real Data: Sugar Mixture Test](#real-data-sugar-mixture-test)
 - [Demo: Unseen Chemicals](#demo-unseen-chemicals)
 - [Project Structure](#project-structure)
 - [Usage](#usage)
+- [Version History](#version-history)
 - [References](#references)
 
 ---
@@ -46,18 +49,18 @@ The key insight: rather than training on specific chemicals, we train the model 
 2. **Reference spectra** `R = [r_1, r_2, ..., r_K]` (pure components, possibly including distractors)
 
 And predicts:
-- **Coefficients** `c = [c_1, c_2, ..., c_K]` — the abundance of each reference in the mixture (sum-to-one via softmax)
-- **Baseline** `b` — the fluorescent background (always non-negative)
+- **Coefficients** `c = [c_1, c_2, ..., c_K]` — the abundance of each reference in the mixture (independent non-negative via softplus)
+- **Baseline** `b` — the fluorescent background (non-negative via soft penalty)
 
 The model never memorizes specific chemicals. At inference, you can swap in completely new reference spectra and the model still works.
 
 ---
 
-## Architecture (v2)
+## Architecture (v3)
 
 ![Architecture diagram](outputs/figs/architecture_diagram.png)
 
-The v2 architecture incorporates key insights from the literature (EGU-Net, PNAS 2024 Georgiev, RamanFormer):
+The architecture incorporates insights from the literature (EGU-Net, PNAS 2024 Georgiev, RamanFormer) with key improvements across three versions:
 
 **Mixture-Only Encoder** (references are NOT encoded through the deep network):
 - 3 Conv1D blocks (1→32→64→128 channels, kernel=7, MaxPool=4)
@@ -66,7 +69,7 @@ The v2 architecture incorporates key insights from the literature (EGU-Net, PNAS
 
 **Reference Projection** (lightweight, no deep encoder):
 - `Linear(3001, 128) + LayerNorm` → `z_r` (K × 128)
-- This avoids encoder collapse (a problem where shared encoders produce identical embeddings for all references)
+- This avoids encoder collapse (v1 had cosine_sim=0.999 between all ref embeddings)
 
 **Cross-Attention:** The unknown spectrum queries the references to build a context-aware representation.
 
@@ -74,9 +77,9 @@ The v2 architecture incorporates key insights from the literature (EGU-Net, PNAS
 
 **Scorer:** MLP that takes `[z_r_i, context, spectral_features]` (dim = 2d+3) → logit per reference.
 
-**Softmax Output:** Architectural constraint ensuring coefficients are non-negative and sum to one — no soft penalty needed.
+**Softplus Output (v3):** Each coefficient is independently non-negative via `softplus(logit)`. Unlike v2's softmax (which forced sum-to-one across all references including distractors), softplus allows each coefficient to be pushed to true zero independently — critical for **distractor suppression**.
 
-**Baseline Head:** MLP on `z_u` → polynomial coefficients (order 5) → smooth non-negative baseline curve.
+**Baseline Head:** MLP on `z_u` → polynomial coefficients (order 5) → smooth baseline. Non-negativity enforced via soft penalty in the loss (v3), since hard ReLU clamping kills gradients for small baselines.
 
 ---
 
@@ -151,9 +154,9 @@ NNLS achieves strong results on synthetic mixtures, providing the performance fl
 
 ### Stage 4: Overfit Sanity Check
 
-Before full training, we verified the v2 architecture can learn by **overfitting to 16 samples**. This confirms the wiring (encoder → cross-attention → scorer → softmax → loss) is correct.
+Before full training, we verified the architecture can learn by **overfitting to 16 samples**. This confirms the wiring (encoder → cross-attention → scorer → softplus → loss) is correct.
 
-Result: **coefficient MAE = 0.00067** after 5000 steps — near-perfect fit.
+Result (v3): **coefficient MAE = 0.012** after 5000 steps, baseline non-negative (0%), distractor coefficients < 0.001.
 
 ![Overfit loss curve](outputs/figs/04_overfit/loss_curve.png)
 
@@ -161,32 +164,80 @@ Result: **coefficient MAE = 0.00067** after 5000 steps — near-perfect fit.
 
 ---
 
-### Stage 5: Full Training
+### Stage 5: Full Training (v3)
 
-Training configuration (v2):
+Training configuration (v3):
 - **Optimizer:** Adam (lr=1e-3, cosine decay to 1e-5)
 - **Batch size:** 64, synthetic data generated on-the-fly
 - **Duration:** 100 epochs × 500 steps/epoch = 50,000 gradient steps
 - **Mixed precision** (AMP) for efficiency
-- **Holdout:** 20% of chemicals reserved for validation (never seen during training)
-- **Infrastructure:** Run:AI GPU cluster with checkpoint auto-resume (survives preemption)
+- **Holdout:** 20% of chemicals (64 compounds) reserved for validation
+- **Infrastructure:** Run:AI GPU cluster with checkpoint auto-resume
 
-**Loss function (v2):**
+**Loss function (v3):**
 ```
-L = λ_c   · MAE(c_pred, c_true)           coefficient accuracy
-  + λ_r   · MSE(y - b_pred, Σ c·R)        reconstruction (uses model's own baseline)
-  + λ_sad · SAD(y - b_pred, Σ c·R)        spectral angle distance (scale-invariant)
-  + λ_b   · MAE(b_pred, b_true)            baseline estimation
-  + λ_l1  · ||c_pred||₁                    sparsity (suppress distractors)
+L = λ_c    · MAE(c_pred, c_true)           coefficient accuracy        (λ=1.0)
+  + λ_r    · MSE(y - b_pred, Σ c·R)        reconstruction              (λ=50.0)
+  + λ_sad  · SAD(y - b_pred, Σ c·R)        spectral angle distance     (λ=1.0)
+  + λ_b    · MAE(b_pred, b_true)            baseline estimation         (λ=0.5)
+  + λ_l1   · ||c_pred||₁                    sparsity (distractor→0)    (λ=0.1)
+  + λ_bneg · mean(relu(-b_pred))            baseline non-negativity    (λ=10.0)
 ```
 
-Key v2 changes from v1:
-- Reconstruction uses `b_pred` (model's own baseline), not `b_true` — at inference `b_true` is unavailable
-- Added **SAD loss** (Spectral Angle Distance) for scale-invariant spectral shape matching
-- Removed `λ_neg` penalty — **softmax** handles non-negativity architecturally
-- Smaller model: d=128 (was 256), 1 transformer layer (was 2), 3 conv blocks (was 4)
+**Key v3 changes from v2:**
+- **softmax → softplus:** Each coefficient is independent; distractors can be driven to true zero without affecting in-mixture coefficients
+- **λ_r: 1.0 → 50.0:** Reconstruction loss was negligible in v2; now it provides meaningful physics-based regularization
+- **λ_l1: 0.01 → 0.1:** Stronger sparsity needed for unbounded softplus coefficients
+- **Baseline non-negativity:** Soft penalty replaces hard ReLU (which killed gradients for small baselines)
 
-> **Note:** Full v2 training is in progress. Results below show the NNLS baseline on correctly generated synthetic data.
+![Training curves](outputs/figs/06_eval_v3/training_curves.png)
+
+---
+
+## Results: DL v3 vs NNLS
+
+### Summary Table (500 holdout samples — unseen chemicals)
+
+| Metric | DL v2 (softmax) | **DL v3 (softplus)** | NNLS |
+|--------|:---:|:---:|:---:|
+| MAE (mean) ↓ | 0.1511 | **0.1234** | **0.0937** |
+| MAE (median) ↓ | 0.1218 | **0.0983** | **0.0634** |
+| Spearman ↑ | 0.279 | **0.513** | 0.483 |
+| DL win rate | 30% | **40.6%** | — |
+
+v3 achieves the **highest Spearman rank correlation** (0.513 > NNLS 0.483), meaning it predicts the **relative ordering** of component contributions better than NNLS. NNLS still wins on absolute MAE due to its direct per-sample optimization.
+
+### Coefficient Scatter: Predicted vs True
+
+![Scatter comparison](outputs/figs/06_eval_v3/scatter_comparison.png)
+
+### Model Comparison
+
+![MAE comparison](outputs/figs/06_eval_v3/mae_comparison_bar.png)
+
+![Spearman comparison](outputs/figs/06_eval_v3/spearman_comparison_bar.png)
+
+### Robustness: MAE vs Number of Components
+
+![MAE vs K](outputs/figs/06_eval_v3/mae_vs_K.png)
+
+### Per-Sample Improvement Distribution
+
+![Improvement histogram](outputs/figs/06_eval_v3/improvement_histogram.png)
+
+### Example Decompositions
+
+Cases where DL v3 outperforms NNLS:
+
+![DL wins example 0](outputs/figs/06_eval_v3/example_dl_wins_0.png)
+
+![DL wins example 1](outputs/figs/06_eval_v3/example_dl_wins_1.png)
+
+Cases where NNLS outperforms DL v3:
+
+![NNLS wins example 0](outputs/figs/06_eval_v3/example_nnls_wins_0.png)
+
+![NNLS wins example 1](outputs/figs/06_eval_v3/example_nnls_wins_1.png)
 
 ---
 
@@ -238,6 +289,30 @@ NNLS decomposes the mixture into its components with high accuracy:
 
 ---
 
+## Real Data: Sugar Mixture Test
+
+We tested the model on **9,600 real sugar mixture spectra** — physical mixtures of glucose, fructose, sucrose, maltose, and water measured in a lab. The model was given the 5 pure reference spectra and asked to decompose each mixture.
+
+This test reveals the **domain gap** between synthetic training data and real measurements:
+
+| Metric | DL v3 | NNLS |
+|--------|:---:|:---:|
+| Reconstruction RMSE | 0.0073 | **0.0003** |
+| Coefficient sum | 2.56 | 1.01 |
+| Baseline non-negative | 67.9% | 100% |
+
+NNLS performs well because it directly solves the linear system per-sample. The DL model struggles because real sugar spectra are highly similar to each other, and the synthetic training distribution doesn't perfectly match real measurement conditions.
+
+Example coefficient comparisons on real sugar mixtures:
+
+![Sugar example 0](outputs/figs/08_real_data_test_v3/example_00_coefficients.png)
+
+![Sugar example 2](outputs/figs/08_real_data_test_v3/example_02_coefficients.png)
+
+**Next steps for real-data improvement:** fine-tuning on labeled real mixtures, improved augmentation to close the domain gap, and hybrid NNLS-DL approaches.
+
+---
+
 ## Demo: Unseen Chemicals
 
 The NNLS baseline's performance on **holdout chemicals** — compounds that were completely excluded from the training chemical pool:
@@ -270,16 +345,16 @@ deep2/
 │   │   └── mcr_als.py            # MCR-ALS wrapper
 │   ├── model/
 │   │   ├── encoder.py            # Conv1D + Transformer (mixture-only encoder)
-│   │   ├── decompose.py          # Cross-attention + scorer + softmax + baseline head
-│   │   └── loss.py               # Multi-component loss (MAE + recon + SAD + baseline + L1)
+│   │   ├── decompose.py          # Cross-attention + scorer + softplus + baseline head
+│   │   └── loss.py               # Multi-component loss (MAE + recon + SAD + baseline + L1 + bneg)
 │   ├── train.py                  # Full training script (CLI, auto-resume, AMP)
 │   └── eval.py                   # Evaluation utilities & metrics
 ├── configs/
-│   └── base.yaml                 # Training hyperparameters (v2)
+│   └── base.yaml                 # Training hyperparameters (v3)
 ├── scripts/
 │   ├── run_notebook02.py         # Synthetic mixture visualization
 │   ├── run_notebook03.py         # Classical baseline evaluation
-│   ├── run_overfit_test.py       # Overfit test execution (v2)
+│   ├── run_overfit_test.py       # Overfit test execution
 │   ├── create_architecture_diagram.py  # Architecture diagram generator
 │   ├── regenerate_broken_plots.py      # Plot regeneration with fixed data
 │   └── submit_train.sh           # Run:AI GPU submission script
@@ -292,8 +367,10 @@ deep2/
 │       ├── 01_exploration/       # Data exploration
 │       ├── 02_synth/             # Synthetic mixture construction
 │       ├── 03_baselines/         # NNLS baseline results
-│       ├── 04_overfit/           # Overfit sanity check (v2)
-│       └── 07_professional/      # Publication-quality figures
+│       ├── 04_overfit/           # Overfit sanity check
+│       ├── 06_eval_v3/          # DL v3 evaluation plots & comparison
+│       ├── 07_professional/      # Publication-quality figures
+│       └── 08_real_data_test_v3/ # Real sugar mixture test (v3)
 ├── checkpoints/                  # Model weights (not in git)
 └── requirements.txt
 ```
@@ -315,10 +392,10 @@ pip install torch numpy scipy pandas matplotlib seaborn pyyaml tqdm tensorboard 
 python scripts/run_overfit_test.py
 
 # Full training (GPU recommended)
-python -m src.train --config configs/base.yaml --run_id v2_run01 --max_epochs 100
+python -m src.train --config configs/base.yaml --run_id v3_run01 --max_epochs 100
 
 # Resume interrupted training
-python -m src.train --config configs/base.yaml --run_id v2_run01  # auto-detects checkpoint
+python -m src.train --config configs/base.yaml --run_id v3_run01  # auto-detects checkpoint
 ```
 
 ### Evaluation
@@ -330,6 +407,20 @@ python scripts/regenerate_broken_plots.py
 # Architecture diagram
 python scripts/create_architecture_diagram.py
 ```
+
+---
+
+## Version History
+
+| Version | Key Changes | Synthetic MAE | Spearman |
+|---------|------------|:---:|:---:|
+| **v1** | Shared encoder, raw linear output, soft non-negativity penalty | — | — |
+| **v2** | Mixture-only encoder, lightweight ref projection, softmax, SAD loss | 0.1511 | 0.279 |
+| **v3** | softplus coefficients, non-negative baseline penalty, rebalanced loss | **0.1234** | **0.513** |
+
+**v1 → v2:** Fixed encoder collapse (cosine sim 0.999 between all references). Moved from shared deep encoder to mixture-only encoder + lightweight reference projection.
+
+**v2 → v3:** Fixed distractor suppression. Softmax forced sum-to-one across all references (including distractors), preventing true zeros. Softplus allows independent non-negative coefficients. Boosted reconstruction loss weight (1→50) and sparsity (0.01→0.1). Added soft baseline non-negativity penalty.
 
 ---
 
